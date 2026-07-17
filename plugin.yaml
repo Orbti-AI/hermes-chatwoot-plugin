@@ -1,0 +1,32 @@
+name: chatwoot-platform
+label: Chatwoot
+kind: platform
+version: 1.0.0
+description: >
+  Chatwoot Agent Bot gateway adapter for Hermes Agent. Runs a small HTTP
+  server that receives Chatwoot Agent Bot webhook events, hands incoming
+  customer messages to the Hermes agent, and posts replies back into the
+  conversation via the Chatwoot API. One inbox/account per hermes profile.
+author: Orbti AI
+requires_env:
+  - name: CHATWOOT_BASE_URL
+    description: "Base URL of the Chatwoot instance, no trailing slash (e.g. https://chat.example.com)"
+    prompt: "Chatwoot base URL"
+    password: false
+  - name: CHATWOOT_BOT_API_KEY
+    description: "The Agent Bot's own access_token (Chatwoot -> Settings -> Agent Bots -> this bot), not a personal user token"
+    prompt: "Chatwoot bot access_token"
+    password: true
+  - name: CHATWOOT_ACCOUNT_ID
+    description: "Chatwoot account_id this bot belongs to (the number in the account URL)"
+    prompt: "Chatwoot account_id"
+    password: false
+optional_env:
+  - name: CHATWOOT_WEBHOOK_HOST
+    description: "Host to bind the webhook server to (default: 0.0.0.0)"
+    prompt: "Bind host"
+    password: false
+  - name: CHATWOOT_WEBHOOK_PORT
+    description: "Port to bind the webhook server to (default: 9000)"
+    prompt: "Bind port"
+    password: false
