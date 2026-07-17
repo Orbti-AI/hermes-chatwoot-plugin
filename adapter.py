@@ -27,9 +27,12 @@ try:
     import aiohttp
 
     AIOHTTP_AVAILABLE = True
-except ImportError:
+except ImportError as _aiohttp_import_error:
     AIOHTTP_AVAILABLE = False
     web = None  # type: ignore[assignment]
+    logging.getLogger(__name__).error(
+        "[chatwoot] aiohttp import failed: %r", _aiohttp_import_error
+    )
 
 from gateway.config import Platform
 from gateway.platforms.base import (
