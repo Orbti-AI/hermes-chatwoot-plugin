@@ -32,3 +32,7 @@ optional_env:
     description: "Port to bind the webhook server to (default: 9000)"
     prompt: "Bind port"
     password: false
+  - name: CHATWOOT_WEBHOOK_SECRET
+    description: "The Agent Bot's `secret` (NOT its access_token) — verifies the X-Chatwoot-Signature on every delivery. Unset means deliveries are not authenticated."
+    prompt: "Chatwoot webhook signing secret"
+    password: true

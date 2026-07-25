@@ -36,9 +36,13 @@ Chatwoot Agent Bot API reference:
 https://developers.chatwoot.com/api-reference/account-agentbots/create-an-agent-bot
 """
 
+import hashlib
+import hmac
+import json
 import logging
 import os
 import socket as _socket
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -81,6 +85,20 @@ _TRUTHY = ("1", "true", "yes", "on")
 # hermes's own convention: "the default profile owns the single shared HTTP
 # listener and serves every profile through the /p/<profile>/ URL prefix".
 _HUB_PROFILE = "default"
+
+# Chatwoot signs every Agent Bot delivery (Webhooks::Trigger#request_headers):
+#   X-Chatwoot-Signature: sha256=HMAC_SHA256(secret, "<timestamp>.<raw body>")
+# The secret is the Agent Bot's own `secret` column (has_secure_token via the
+# WebhookSecretable concern) — a different value from its access_token.
+_SIGNATURE_HEADER = "X-Chatwoot-Signature"
+_TIMESTAMP_HEADER = "X-Chatwoot-Timestamp"
+
+# How far the signed timestamp may drift before a delivery is refused. Bounds
+# the window in which a captured request can be replayed; wide enough to
+# absorb clock skew between containers.
+_SIGNATURE_TOLERANCE_SECONDS = int(
+    os.environ.get("CHATWOOT_SIGNATURE_TOLERANCE", "300")
+)
 
 
 def _multiplex_enabled() -> bool:
@@ -193,13 +211,23 @@ def _read_env_file(path: Path) -> Dict[str, str]:
 class _Tenant:
     """One profile's Chatwoot account: where to post, and as whom."""
 
-    __slots__ = ("profile", "base_url", "account_id", "token")
+    __slots__ = ("profile", "base_url", "account_id", "token", "secret")
 
-    def __init__(self, profile: str, base_url: str, account_id: str, token: str):
+    def __init__(
+        self,
+        profile: str,
+        base_url: str,
+        account_id: str,
+        token: str,
+        secret: str = "",
+    ):
         self.profile = profile
         self.base_url = base_url.rstrip("/")
         self.account_id = account_id
         self.token = token
+        # The Agent Bot's signing secret. Optional: leaving it unset is an
+        # explicit opt-out of signature checking, logged loudly at startup.
+        self.secret = secret
 
     @classmethod
     def from_values(
@@ -208,9 +236,10 @@ class _Tenant:
         base_url = values.get("CHATWOOT_BASE_URL", "").strip()
         account_id = values.get("CHATWOOT_ACCOUNT_ID", "").strip()
         token = values.get("CHATWOOT_BOT_API_KEY", "").strip()
+        secret = values.get("CHATWOOT_WEBHOOK_SECRET", "").strip()
         if not (base_url and account_id and token):
             return None
-        return cls(profile, base_url, account_id, token)
+        return cls(profile, base_url, account_id, token, secret)
 
 
 def _discover_tenants() -> Dict[str, _Tenant]:
@@ -342,6 +371,16 @@ class ChatwootAdapter(BasePlatformAdapter):
                 self._port,
                 name,
             )
+            if not tenant.secret:
+                logger.warning(
+                    "[chatwoot] profile '%s' has no CHATWOOT_WEBHOOK_SECRET — "
+                    "webhook deliveries are NOT authenticated. Anything that "
+                    "can reach %s:%d can forge a customer message for this "
+                    "tenant. Set it to the Agent Bot's `secret` to enforce.",
+                    name,
+                    self._host,
+                    self._port,
+                )
         return True
 
     def _port_in_use(self) -> bool:
@@ -393,6 +432,66 @@ class ChatwootAdapter(BasePlatformAdapter):
             return self._profile if self._profile in self._tenants else None
         return name if name in self._tenants else None
 
+    def _verify_signature(
+        self, request: "web.Request", raw_body: bytes, tenant: _Tenant
+    ) -> "Optional[web.Response]":
+        """Return a 401 response when the delivery is not provably Chatwoot's.
+
+        Without this, any host that can reach the port can forge a customer
+        message: it cannot read the tenant's token, but it can drive the agent
+        with attacker-chosen text inside that tenant's session and memory.
+        """
+        provided = request.headers.get(_SIGNATURE_HEADER, "")
+        timestamp = request.headers.get(_TIMESTAMP_HEADER, "")
+        if not provided or not timestamp:
+            logger.warning(
+                "[chatwoot] unsigned delivery for profile '%s' — rejected",
+                tenant.profile,
+            )
+            return web.json_response(
+                {"ok": False, "error": "missing signature"}, status=401
+            )
+
+        # Reject stale timestamps so a captured delivery cannot be replayed
+        # indefinitely. The timestamp is inside the signed string, so it
+        # cannot be adjusted without invalidating the signature.
+        try:
+            age = abs(time.time() - int(timestamp))
+        except ValueError:
+            logger.warning(
+                "[chatwoot] non-numeric timestamp for profile '%s' — rejected",
+                tenant.profile,
+            )
+            return web.json_response(
+                {"ok": False, "error": "bad timestamp"}, status=401
+            )
+        if age > _SIGNATURE_TOLERANCE_SECONDS:
+            logger.warning(
+                "[chatwoot] delivery for profile '%s' is %.0fs out of date "
+                "(tolerance %ds) — rejected",
+                tenant.profile,
+                age,
+                _SIGNATURE_TOLERANCE_SECONDS,
+            )
+            return web.json_response({"ok": False, "error": "stale"}, status=401)
+
+        expected = hmac.new(
+            tenant.secret.encode("utf-8"),
+            f"{timestamp}.".encode("utf-8") + raw_body,
+            hashlib.sha256,
+        ).hexdigest()
+        # compare_digest, not ==: a short-circuiting comparison leaks how much
+        # of the digest matched through timing, which is enough to forge one.
+        if not hmac.compare_digest(f"sha256={expected}", provided):
+            logger.warning(
+                "[chatwoot] signature mismatch for profile '%s' — rejected",
+                tenant.profile,
+            )
+            return web.json_response(
+                {"ok": False, "error": "bad signature"}, status=401
+            )
+        return None
+
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":
         profile = self._resolve_profile(request)
         if profile is None:
@@ -405,8 +504,18 @@ class ChatwootAdapter(BasePlatformAdapter):
             )
         tenant = self._tenants[profile]
 
+        # Read the body as bytes and verify BEFORE parsing. The signature
+        # covers the exact bytes Chatwoot sent, so re-serializing parsed JSON
+        # would produce a different string and never match.
+        raw_body = await request.read()
+
+        if tenant.secret:
+            rejection = self._verify_signature(request, raw_body, tenant)
+            if rejection is not None:
+                return rejection
+
         try:
-            payload = await request.json()
+            payload = json.loads(raw_body)
         except Exception as e:
             logger.warning("[chatwoot] invalid JSON payload: %s", e)
             return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)

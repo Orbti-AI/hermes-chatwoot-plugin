@@ -23,6 +23,7 @@ Set in the profile's `.env` (or via `hermes gateway setup`):
 | `CHATWOOT_ACCOUNT_ID` | yes | The Chatwoot `account_id` this bot belongs to |
 | `CHATWOOT_WEBHOOK_HOST` | no | Bind host (default `::`, dual-stack). A `0.0.0.0` bind is unreachable on IPv6-only private networks such as Railway's |
 | `CHATWOOT_WEBHOOK_PORT` | no | Bind port for the webhook server (default `9000`) |
+| `CHATWOOT_WEBHOOK_SECRET` | no | The Agent Bot's `secret` — see [Webhook signatures](#webhook-signatures) |
 
 `aiohttp` is required and is **not** guaranteed to come with `hermes-agent` —
 install it explicitly (`pip install aiohttp`). When it is missing the adapter
@@ -45,6 +46,35 @@ an individual conversation. Chatwoot only fires the webhook for conversations
 in a bot-connected inbox, and only while they are `pending` — it pulls a
 conversation out of the bot's control (status → `open`) as soon as a delivery
 fails. Send a message in that inbox to confirm the round trip.
+
+## Webhook signatures
+
+Chatwoot signs every Agent Bot delivery:
+
+```
+X-Chatwoot-Signature: sha256=HMAC_SHA256(secret, "<timestamp>.<raw body>")
+X-Chatwoot-Timestamp: <unix seconds>
+```
+
+Set `CHATWOOT_WEBHOOK_SECRET` to that bot's `secret` and the adapter verifies
+it, rejecting anything that does not match with `401`. The secret is the Agent
+Bot's `secret` column, **not** its `access_token`:
+
+```ruby
+AgentBot.find(<id>).secret
+```
+
+Leaving it unset is an opt-out, and the adapter warns at startup when a tenant
+has no secret. Understand what you are opting out of: an unsigned endpoint
+lets anything that can reach the port forge a customer message. It cannot read
+the tenant's token, but it can drive the agent with attacker-chosen text
+inside that tenant's session and memory — a prompt-injection surface, on a
+port normally reachable by every other service on the same private network.
+
+Deliveries whose timestamp is more than `CHATWOOT_SIGNATURE_TOLERANCE` seconds
+(default 300) from now are refused, so a captured request cannot be replayed
+indefinitely. The timestamp is inside the signed string, so it cannot be
+adjusted without breaking the signature.
 
 ## Multi-tenant
 
