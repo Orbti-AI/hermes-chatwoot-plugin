@@ -77,6 +77,11 @@ logger = logging.getLogger(__name__)
 
 _TRUTHY = ("1", "true", "yes", "on")
 
+# The profile that owns the shared listener under multiplexing. Matches
+# hermes's own convention: "the default profile owns the single shared HTTP
+# listener and serves every profile through the /p/<profile>/ URL prefix".
+_HUB_PROFILE = "default"
+
 
 def _multiplex_enabled() -> bool:
     """True when this gateway serves more than its own profile.
@@ -261,16 +266,22 @@ class ChatwootAdapter(BasePlatformAdapter):
             )
             return False
 
-        # Only the active profile owns the listener. A secondary profile's
-        # adapter connects as a no-op, so the gateway does not log it as a
-        # failed platform and spin a pointless reconnect loop for it.
-        owner = _active_profile()
-        if self._profile != owner:
+        # Exactly one instance may bind. The hub is the DEFAULT-scoped one —
+        # the profile whose HERMES_HOME is the hermes root rather than a
+        # profiles/<name> directory.
+        #
+        # Deliberately not "am I the active profile": get_active_profile_name()
+        # answers differently depending on the runtime scope an instance is
+        # constructed and connected in, so with two tenants more than one
+        # instance can conclude it is the active one and the second to start
+        # dies on "port already in use". HERMES_HOME is unambiguous, and every
+        # multiplexed gateway has exactly one default-scoped instance.
+        if _multiplex_enabled() and self._profile != _HUB_PROFILE:
             logger.info(
                 "[chatwoot] profile '%s' is served by the '%s' hub at "
                 "/webhook/%s — not binding a second port",
                 self._profile,
-                owner,
+                _HUB_PROFILE,
                 self._profile,
             )
             self._mark_connected()
