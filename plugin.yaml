@@ -1,12 +1,14 @@
 name: chatwoot-platform
 label: Chatwoot
 kind: platform
-version: 1.0.0
+version: 1.1.0
 description: >
-  Chatwoot Agent Bot gateway adapter for Hermes Agent. Runs a small HTTP
+  Chatwoot Agent Bot gateway adapter for Hermes Agent. Runs a single HTTP
   server that receives Chatwoot Agent Bot webhook events, hands incoming
   customer messages to the Hermes agent, and posts replies back into the
-  conversation via the Chatwoot API. One inbox/account per hermes profile.
+  conversation via the Chatwoot API. One inbox/account per hermes profile;
+  with gateway.multiplex_profiles on, one listener serves every profile via
+  POST /webhook/<profile>.
 author: Orbti AI
 requires_env:
   - name: CHATWOOT_BASE_URL
@@ -23,7 +25,7 @@ requires_env:
     password: false
 optional_env:
   - name: CHATWOOT_WEBHOOK_HOST
-    description: "Host to bind the webhook server to (default: 0.0.0.0)"
+    description: "Host to bind the webhook server to (default: ::, dual-stack — a 0.0.0.0 bind is unreachable on IPv6-only private networks like Railway's)"
     prompt: "Bind host"
     password: false
   - name: CHATWOOT_WEBHOOK_PORT
