@@ -75,18 +75,60 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _multiplex_enabled() -> bool:
-    """True when this gateway serves more than its own profile."""
-    try:
-        from gateway.config import load_gateway_config
+_TRUTHY = ("1", "true", "yes", "on")
 
-        return bool(getattr(load_gateway_config(), "multiplex_profiles", False))
+
+def _multiplex_enabled() -> bool:
+    """True when this gateway serves more than its own profile.
+
+    Reads the operator env var, then falls back to scanning config.yaml as
+    text. Deliberately NOT via ``load_gateway_config()``: that resolves plugin
+    platforms, which calls this plugin's ``check_fn``, which calls back into
+    here. The cycle surfaces as "Failed to process config.yaml — maximum
+    recursion depth exceeded" and silently drops the profile to its .env
+    defaults, which is a very long way from the actual cause.
+    """
+    raw = os.environ.get("GATEWAY_MULTIPLEX_PROFILES")
+    if raw is not None and raw.strip():
+        return raw.strip().lower() in _TRUTHY
+
+    try:
+        text = (_hermes_home() / "config.yaml").read_text(
+            encoding="utf-8", errors="replace"
+        )
     except Exception:
-        logger.debug("[chatwoot] could not read multiplex_profiles", exc_info=True)
         return False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("multiplex_profiles:"):
+            value = stripped.split(":", 1)[1].strip().strip("\"'").lower()
+            return value in _TRUTHY
+    return False
+
+
+def _hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
+
+
+def _own_profile() -> str:
+    """The profile THIS adapter instance belongs to.
+
+    Derived from HERMES_HOME, not from ``get_active_profile_name()``. Under
+    multiplexing each secondary adapter is constructed inside
+    ``_profile_runtime_scope(profile_home)``, which repoints HERMES_HOME but
+    leaves the active-profile marker alone — so asking for the active profile
+    returns the hub for every instance, every instance concludes it owns the
+    listener, and the second one to start dies on "port already in use".
+    """
+    try:
+        home = _hermes_home().resolve()
+    except Exception:
+        return "default"
+    return home.name if home.parent.name == "profiles" else "default"
 
 
 def _active_profile() -> str:
+    """The profile the gateway process itself was started as (the hub)."""
     try:
         from hermes_cli.profiles import get_active_profile_name
 
@@ -161,11 +203,11 @@ def _discover_tenants() -> Dict[str, _Tenant]:
     because only one profile's secrets can occupy os.environ at a time.
     """
     tenants: Dict[str, _Tenant] = {}
-    active = _active_profile()
+    mine = _own_profile()
 
-    own = _Tenant.from_values(active, dict(os.environ))
+    own = _Tenant.from_values(mine, dict(os.environ))
     if own:
-        tenants[active] = own
+        tenants[mine] = own
 
     if not _multiplex_enabled():
         return tenants
@@ -202,7 +244,7 @@ class ChatwootAdapter(BasePlatformAdapter):
         self._host = os.environ.get("CHATWOOT_WEBHOOK_HOST", "::")
         self._port = int(os.environ.get("CHATWOOT_WEBHOOK_PORT", "9000"))
 
-        self._profile = _active_profile()
+        self._profile = _own_profile()
         self._tenants: Dict[str, _Tenant] = {}
 
         self._runner: Optional["web.AppRunner"] = None
