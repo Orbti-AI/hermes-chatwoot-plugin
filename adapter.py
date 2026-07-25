@@ -112,7 +112,20 @@ def _multiplex_enabled() -> bool:
 
 
 def _hermes_home() -> Path:
-    return Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
+    """This instance's hermes home, honouring the multiplexer's scope.
+
+    Must go through ``get_hermes_home()``: ``_profile_runtime_scope`` redirects
+    a profile's home with ``set_hermes_home_override``, a contextvar, and does
+    NOT touch ``os.environ["HERMES_HOME"]``. Reading the env var directly
+    returns the process-wide root for every instance, so all of them look like
+    the default profile and all of them try to bind.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+
+        return Path(get_hermes_home())
+    except Exception:
+        return Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
 
 
 def _own_profile() -> str:
