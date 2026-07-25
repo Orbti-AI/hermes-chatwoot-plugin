@@ -20,14 +20,19 @@ the agent turn resolves that profile's config, skills, memory and credentials
 — the same mechanism the built-in webhook platform uses for its
 ``/p/<profile>/webhooks/<route>`` prefix.
 
-Only the ACTIVE profile's adapter binds the port; secondary profiles get a
+Only the DEFAULT-scoped adapter binds the port; secondary profiles get a
 no-op adapter, since a second bind on the same port could only collide and
-the hub already serves them by path. Because the hub is the instance that
-receives every tenant's webhook, it is also the instance whose ``send()``
-posts every reply — so it resolves outbound credentials per tenant rather
-than using its own. ``chat_id`` is namespaced ``<profile>:<conversation_id>``
-to carry that routing: Chatwoot conversation ids are per-account and would
-otherwise collide across tenants.
+the hub already serves them by path.
+
+Every instance resolves the full tenant map, whether or not it binds, and
+``chat_id`` is namespaced ``<profile>:<conversation_id>`` so ``send()`` can
+recover the tenant from it. Both are needed because which instance sends a
+reply is not fixed: hermes ≤ 0.18 replied through the instance that received
+the webhook (the hub), and ≥ 0.19 replies through the adapter of the profile
+the turn ran under. Resolving tenants everywhere works under both. The
+namespace is required regardless — Chatwoot conversation ids are per-account
+and collide across tenants, so a bare id could post one customer's reply into
+another tenant's account.
 
 Adding a tenant is: create the profile, set its three CHATWOOT_* values,
 restart. No code change and no per-tenant port.
@@ -308,6 +313,17 @@ class ChatwootAdapter(BasePlatformAdapter):
             )
             return False
 
+        # Resolve tenants on EVERY instance, before deciding who binds.
+        #
+        # A non-binding instance still sends: hermes ≥ 0.19 routes a reply
+        # through the adapter of the profile the turn ran under, not through
+        # the instance that received the webhook (0.18 did the latter). Both
+        # are reasonable; an adapter that only knows its tenants when it owns
+        # the listener works under one and fails under the other with
+        # "unknown tenant" at send time — after the agent has already spent a
+        # turn. Knowing them always costs one .env read and is version-proof.
+        self._tenants = _discover_tenants()
+
         # Exactly one instance may bind. The hub is the DEFAULT-scoped one —
         # the profile whose HERMES_HOME is the hermes root rather than a
         # profiles/<name> directory.
@@ -329,7 +345,6 @@ class ChatwootAdapter(BasePlatformAdapter):
             self._mark_connected()
             return True
 
-        self._tenants = _discover_tenants()
         if not self._tenants:
             logger.error(
                 "[chatwoot] no served profile has a complete "
@@ -605,7 +620,13 @@ class ChatwootAdapter(BasePlatformAdapter):
     ) -> SendResult:
         tenant, conversation_id = self._split_chat_id(chat_id)
         if tenant is None:
-            logger.warning("[chatwoot] no tenant for chat_id %r", chat_id)
+            logger.warning(
+                "[chatwoot] no tenant for chat_id %r — known: %s. The profile "
+                "in the chat_id has no complete CHATWOOT_* config, or its .env "
+                "was unreadable when this adapter connected.",
+                chat_id,
+                sorted(self._tenants) or "(nenhum)",
+            )
             return SendResult(success=False, error=f"unknown tenant for {chat_id}")
 
         url = (
