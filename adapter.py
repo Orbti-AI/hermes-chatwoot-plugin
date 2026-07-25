@@ -360,8 +360,6 @@ class ChatwootAdapter(BasePlatformAdapter):
             )
             return False
 
-        self._session = aiohttp.ClientSession()
-
         app = web.Application()
         app.router.add_get("/health", self._handle_health)
         # The per-profile route is what lets one listener serve every tenant.
@@ -414,6 +412,20 @@ class ChatwootAdapter(BasePlatformAdapter):
             return True
         except (ConnectionRefusedError, OSError):
             return False
+
+    async def _get_session(self) -> "aiohttp.ClientSession":
+        """Return the outbound HTTP session, creating it on first use.
+
+        Not created in ``connect()``: a non-binding instance returns from
+        there early and still sends (hermes >= 0.19 replies through the
+        profile's own adapter), so it would reach ``send()`` with no session.
+        That failed as a bare ``assert``, whose AssertionError has an empty
+        str() — the log read "reply POST error (profile=imunizar): " with
+        nothing after the colon, which says almost nothing.
+        """
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
 
     async def disconnect(self) -> None:
         if self._runner:
@@ -640,8 +652,8 @@ class ChatwootAdapter(BasePlatformAdapter):
         }
 
         try:
-            assert self._session is not None
-            async with self._session.post(
+            session = await self._get_session()
+            async with session.post(
                 url,
                 json=body,
                 headers=headers,
